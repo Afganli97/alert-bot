@@ -1,0 +1,16 @@
+# Runtime dependencies. Python 3.12, one virtualenv at .venv.
+#   python3 -m venv .venv
+#   .venv/bin/pip install --no-cache-dir -r requirements.txt
+#
+# Direct dependencies only, pinned exactly. Transitive versions come from pip's
+# resolver; see PLAN.md §2 for why the list is this short.
+
+# Telegram layer. Brings aiohttp (webhook server) and pydantic (update models)
+# transitively, so neither is listed separately.
+aiogram==3.31.0
+
+# Outbound HTTP: DexScreener token lookup and batch price polling.
+httpx==0.28.1
+
+# MongoDB. Uses pymongo.AsyncMongoClient; motor is deprecated and not used.
+pymongo==4.18.0
