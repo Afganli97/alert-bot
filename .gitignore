@@ -1,0 +1,14 @@
+# Virtualenv
+.venv/
+
+# Secrets — never commit real configuration
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
