@@ -68,8 +68,8 @@ rejected again. The `web/` package stays, and so does step 7 of §8.
   queueing update types the bot does not handle.
 - Startup fails loudly, before the listener binds, when `WEBHOOK_URL` is unset or does not
   start with `https://`, and when `WEBHOOK_SECRET` is unset. The message names the variable.
-- **TLS is terminated outside this process.** Existing infrastructure terminates it and
-  forwards to `WEBHOOK_HOST:WEBHOOK_PORT` over plain HTTP. The bot never reads a
+- **TLS is terminated outside this process.** nginx terminates it (§9.1) and forwards to
+  `WEBHOOK_HOST:WEBHOOK_PORT` over plain HTTP. The bot never reads a
   certificate, never binds 443 and has no HTTPS code path. `WEBHOOK_URL` is only the public
   https address handed to Telegram. See §9.1.
 - There is no `BOT_MODE` variable: there is one transport.
@@ -122,7 +122,6 @@ alert_bot/
 
   web/
     server.py            aiohttp app hosting the aiogram webhook
-    health.py            GET /health for the supervisor
 
 tests/                   pytest, mirrors the package layout
 deploy/                  systemd unit, no secrets in it (§9.1)
@@ -227,7 +226,7 @@ answered · **answered** = a question, not a defect. Nothing is left deferred.
 | §6.10a Downward moves render as `🔻 SYM 5.00%`, no minus sign | port as-is | The arrow already carries the direction and users read this message hundreds of times a day; changing it breaks both expectations and output comparison. |
 | §6.10b `formatPrice` has no guard for `price <= 0` | port as-is | Same formatting for the same input, including JS exponent spelling (`1.000e-5`, not Python's `1.000e-05`) — a parity requirement covered by tests. |
 | §6.11 Only `update.message` with non-empty text is handled | port as-is | The legacy bot sends no keyboards, so nothing in production can depend on callback queries; `allowed_updates=["message"]` keeps the surface identical. Buttons are §7. |
-| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | A separate Oracle Always Free instance (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by existing infrastructure in front of the process. Written up in §9.1. |
+| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | A separate Oracle Always Free instance (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by nginx on the legacy instance. Written up in §9.1. |
 | §4 `TG_QUEUE_DELAY_MS` parsed into config but never read (35 ms hardcoded) | fix now | The variable is a no-op today, so nobody can depend on it; the queue reads it, with 35 ms as the default, preserving current timing. |
 | §4 `BLOCKED_USERS_CACHE_TTL_MS` used but missing from `.env.template` | fix now | Documentation-only; the variable is in `.env.example` with its default. |
 | §4 `TELEGRAM_TOKEN` re-read and `ADMIN_CHAT_IDS` re-parsed on every call | fix now | `process.env` does not change after `dotenv` loads it, so re-parsing is pure waste with no observable effect. Read once in `config.py`. |
@@ -296,7 +295,8 @@ Deliberate extension points, each already a module or a registry rather than a T
    §9.2, plus a read-only smoke test on a copy.
 3. `chains/` with its validation/normalisation tests (the §6.4 fix lands here).
 4. `services/` — DexScreener and the send queue, tested against recorded responses.
-5. `monitor/` — the cycle and conditions, byte-compared against legacy message output.
+5. `monitor/` — the cycle and conditions, byte-compared against legacy message output,
+   including the watchdog notifier of §9.1.
 6. `bot/` — routers and FSM, replacing the sessions Map.
 7. `web/` — webhook with a real `secret_token` (§6.1, §2.1).
 8. Dual run on the second bot token against a cloned database, output diffed, then the
@@ -313,13 +313,29 @@ Deliberate extension points, each already a module or a registry rather than a T
   `TELEGRAM_TOKEN`, `MONGO_URI` and `WEBHOOK_SECRET`; `MemoryMax=` is set, sized from the
   resident set measured during the dual run rather than guessed now; `Restart=on-failure`.
   Long-running processes are started by systemd, never by hand.
+- **Liveness is a systemd watchdog, not an HTTP endpoint.** The unit is `Type=notify` with
+  `WatchdogSec=` at a small multiple of `DEX_CYCLE_INTERVAL_MS` — 60 s against the 20 s cycle
+  — and `monitor/scheduler.py` sends `WATCHDOG=1` to `$NOTIFY_SOCKET` after each completed
+  cycle. That is a datagram on a unix socket written with the stdlib `socket` module: no
+  dependency, nothing added to §2. `READY=1` is sent once, after the webhook is registered and
+  the first cycle has completed. A price loop that stalls without the process dying is
+  therefore restarted — the failure `Restart=on-failure` cannot catch on its own. Nothing is
+  exposed on the network, there is no `/health` route, and when `NOTIFY_SOCKET` is unset — a
+  local run, a test — the notifier is a no-op.
 - **MongoDB Atlas.** The driver handles TLS to the cluster. Two operational preconditions:
   the instance's egress address is on the Atlas IP allowlist, and `MONGO_MAX_POOL_SIZE` (10,
-  the legacy value) fits the cluster tier's connection limit.
-- **TLS is terminated in front of the bot** by existing infrastructure. The process serves
-  plain HTTP on `WEBHOOK_PORT` and binds `WEBHOOK_HOST` — `127.0.0.1` when the terminator
-  runs on the same host. It never handles a certificate. `WEBHOOK_URL` is only the public
+  the legacy value) fits the cluster tier's connection limit — checked against 20 for the
+  duration of the dual run, when two bots share the cluster (§9.3).
+- **TLS is terminated by nginx running on the legacy bot's own instance** (hostname
+  `dexscreener-bot-v3`), which listens on 80 and 443 and reverse-proxies to the bot process.
+  The bot never handles a certificate, never binds 443 and has no HTTPS code path. It serves
+  plain HTTP on `WEBHOOK_PORT` and binds `WEBHOOK_HOST`. `WEBHOOK_URL` is only the public
   https address given to Telegram, and §2.1 rejects a non-https value at startup.
+- **Open, and the human's to decide.** The new bot runs on a *different* instance (first
+  bullet), so that terminator is not on its host. How the Python bot is given a public https
+  address is a deployment decision taken separately. It fixes `WEBHOOK_HOST` — `127.0.0.1`
+  only if the terminator ends up local — and the dual run of §9.3 waits on it, because
+  token #2 needs a public URL of its own. No variant is chosen here.
 
 ### 9.2 The `users` schema change, read-compatible
 
@@ -351,8 +367,9 @@ user's next message restores `deliverable`.
 Telegram delivers a token's updates to exactly one webhook registration, so the two bots
 cannot share one. The human creates a second BotFather token for the Python bot.
 
-- The Python bot runs on the new host with token #2, its own `WEBHOOK_URL` behind the same
-  TLS front, and a **cloned** database. Production is untouched throughout.
+- The Python bot runs on the new host with token #2, its own `WEBHOOK_URL` on the public
+  https address the open decision in §9.1 supplies, and a **cloned** database — cloned as
+  described below, once per comparison window. Production is untouched throughout.
 - **Sends are real and they arrive.** There is no dry-run mode and no `DRY_RUN` flag: a
   switch that silently disables all sending is a dangerous thing to carry in a bot whose
   only job is to send. The operator presses **Start** on bot #2 before the window opens, so
@@ -367,6 +384,76 @@ cannot share one. The human creates a second BotFather token for the Python bot.
   operator receives** — one per bot, read side by side — for the same cycle window. The
   §6.4 alerts that only the new bot fires are expected extras and are listed separately
   rather than counted as differences.
+
+**How the clone is made.** The Atlas free tier has no snapshot restore, so the clone is a
+`mongodump`/`mongorestore` pair into a **second database inside the same cluster**, under a
+different name:
+
+```
+mongodump    --uri="$MONGO_URI" --out "$TMP/dump"
+mongorestore --uri="$MONGO_URI" --drop \
+             --nsFrom 'dexalerts.*' --nsTo 'dexalerts_clone.*' "$TMP/dump"
+```
+
+- The tools are `mongodb-database-tools`, run by the operator. They are not a project
+  dependency and no code in this repository clones anything.
+- The Python bot is pointed at the clone with `MONGO_DB_NAME=dexalerts_clone`, which already
+  exists in `.env.example` and overrides the database name embedded in the URI; the connection
+  string itself is unchanged. The legacy bot cannot be misdirected the same way — it calls
+  `client.db()` with no argument (`lib/db.js:25`) and always uses the name in its own URI.
+- `--drop` acts only on the namespaces being restored, and both names are visible in the one
+  command, so it is checked before it is run. Production is never a restore target.
+- Both bots then talk to **one cluster and share its connection budget**: two processes at
+  `maxPoolSize` 10 is up to 20 connections, before anything the operator's own tools hold.
+  The Atlas precondition in §9.1 is therefore checked against 20 for the duration of the dual
+  run, not 10. The clone also doubles the stored data against the tier's storage quota;
+  today's corpus is small enough that this is a note rather than a constraint.
+- The dump is not a point-in-time snapshot, and it does not need to be: `/add` is unreachable
+  in production (§6), so the alert corpus is frozen and `condition.baselinePrice` is the only
+  field a concurrent production cycle can move.
+
+**Comparison drift is structural, and it caps the window length.**
+
+Both databases start identical, so the first cycles are directly comparable. They stop being
+comparable the moment the two bots write different baselines for the same alert, and that is
+guaranteed to happen:
+
+- A §6.4 alert — Solana, or a checksummed EVM address — fires only on the new bot.
+  `updateAlertBaseline` (`checkers/dexPriceChecker.js:120`) rewrites `condition.baselinePrice`
+  on the clone; production keeps what it holds, which for these alerts is a value written
+  before the address stopped matching, or `null`. From that moment the two documents for that
+  alert differ permanently.
+- Because the baseline is the anchor for the *next* comparison and is reset to the current
+  price at every firing (§5, `conditionEvaluator.js:25-40`), the divergence compounds: each
+  later firing is measured from a different anchor on each side, so the firings drift further
+  apart with every one of them.
+- The same happens, more slowly, to alerts both bots fire: two independent 20 s loops sample
+  at different instants, each side anchors at a slightly different price, and those
+  differences accumulate too.
+
+Three consequences, none of them optional:
+
+- **Windows are short** — hours, not days.
+- **Every window starts from a fresh clone.** Re-cloning is the only thing that
+  re-synchronises the baselines. `/reset_anchors` is not a substitute: it nulls the baselines
+  on one database, so it creates a difference instead of removing one, and it is never run
+  against production.
+- **Differences observed late in a long window are not evidence of a new defect.** Divergence
+  is the expected end state of a long run. Only a difference seen in a window that started
+  from a fresh clone counts as a finding.
+
+**The dual-run procedure**, once per window:
+
+1. Drop the previous clone database, if one is left over. Only the clone name is ever dropped.
+2. `mongodump` production and `mongorestore` under the clone name, as above.
+3. On the new host's `EnvironmentFile`: token #2 in `TELEGRAM_TOKEN`, the clone name in
+   `MONGO_DB_NAME`. `MONGO_URI` is otherwise production's.
+4. Start the unit. Check that bot #2 answers `/help`, and that the operator has pressed Start
+   on it so no send can 403.
+5. Run the window. Read the two message streams side by side against the queue's INFO send
+   log (§5).
+6. Stop the unit. Write down the differences; list the §6.4 extras separately.
+7. For the next window, return to step 1. A clone is never reused across windows.
 
 ### 9.4 Cutover
 
