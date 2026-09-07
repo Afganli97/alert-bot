@@ -226,7 +226,7 @@ answered · **answered** = a question, not a defect. Nothing is left deferred.
 | §6.10a Downward moves render as `🔻 SYM 5.00%`, no minus sign | port as-is | The arrow already carries the direction and users read this message hundreds of times a day; changing it breaks both expectations and output comparison. |
 | §6.10b `formatPrice` has no guard for `price <= 0` | port as-is | Same formatting for the same input, including JS exponent spelling (`1.000e-5`, not Python's `1.000e-05`) — a parity requirement covered by tests. |
 | §6.11 Only `update.message` with non-empty text is handled | port as-is | The legacy bot sends no keyboards, so nothing in production can depend on callback queries; `allowed_updates=["message"]` keeps the surface identical. Buttons are §7. |
-| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | A separate Oracle Always Free instance (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by nginx on the legacy instance. Written up in §9.1. |
+| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | The legacy bot's own host (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by the nginx already on that host, which gains one `/webhook-v2` location. Written up in §9.1. |
 | §4 `TG_QUEUE_DELAY_MS` parsed into config but never read (35 ms hardcoded) | fix now | The variable is a no-op today, so nobody can depend on it; the queue reads it, with 35 ms as the default, preserving current timing. |
 | §4 `BLOCKED_USERS_CACHE_TTL_MS` used but missing from `.env.template` | fix now | Documentation-only; the variable is in `.env.example` with its default. |
 | §4 `TELEGRAM_TOKEN` re-read and `ADMIN_CHAT_IDS` re-parsed on every call | fix now | `process.env` does not change after `dotenv` loads it, so re-parsing is pure waste with no observable effect. Read once in `config.py`. |
@@ -306,8 +306,11 @@ Deliberate extension points, each already a module or a registry rather than a T
 
 ### 9.1 Host and process
 
-- A **separate Oracle Always Free instance**, Ubuntu 24.04, 1 GB RAM shared with other
-  processes. The legacy bot keeps its own host until the cutover is judged final.
+- **The same host as the legacy bot** (`dexscreener-bot-v3`), Ubuntu 24.04, 1 GB RAM, now
+  shared with the legacy process as well as everything else on it. With one user, a second
+  instance would buy an independence we do not need yet, and retiring the legacy host is a
+  separate task for after the cutover. Both bots share the 1 GB, which is what `MemoryMax=`
+  is sized against once the dual run has measured the resident set.
 - Python 3.12, one virtualenv, `pip install --no-cache-dir`.
 - **systemd**, unit checked into `deploy/` with no secrets in it: `EnvironmentFile=` supplies
   `TELEGRAM_TOKEN`, `MONGO_URI` and `WEBHOOK_SECRET`; `MemoryMax=` is set, sized from the
@@ -322,20 +325,27 @@ Deliberate extension points, each already a module or a registry rather than a T
   therefore restarted — the failure `Restart=on-failure` cannot catch on its own. Nothing is
   exposed on the network, there is no `/health` route, and when `NOTIFY_SOCKET` is unset — a
   local run, a test — the notifier is a no-op.
-- **MongoDB Atlas.** The driver handles TLS to the cluster. Two operational preconditions:
-  the instance's egress address is on the Atlas IP allowlist, and `MONGO_MAX_POOL_SIZE` (10,
-  the legacy value) fits the cluster tier's connection limit — checked against 20 for the
-  duration of the dual run, when two bots share the cluster (§9.3).
-- **TLS is terminated by nginx running on the legacy bot's own instance** (hostname
-  `dexscreener-bot-v3`), which listens on 80 and 443 and reverse-proxies to the bot process.
-  The bot never handles a certificate, never binds 443 and has no HTTPS code path. It serves
-  plain HTTP on `WEBHOOK_PORT` and binds `WEBHOOK_HOST`. `WEBHOOK_URL` is only the public
-  https address given to Telegram, and §2.1 rejects a non-https value at startup.
-- **Open, and the human's to decide.** The new bot runs on a *different* instance (first
-  bullet), so that terminator is not on its host. How the Python bot is given a public https
-  address is a deployment decision taken separately. It fixes `WEBHOOK_HOST` — `127.0.0.1`
-  only if the terminator ends up local — and the dual run of §9.3 waits on it, because
-  token #2 needs a public URL of its own. No variant is chosen here.
+- **MongoDB Atlas.** The driver handles TLS to the cluster. One operational precondition is
+  already satisfied — the egress address is on the Atlas IP allowlist, because it is the
+  legacy bot's — and one remains: `MONGO_MAX_POOL_SIZE` (10, the legacy value) must fit the
+  cluster tier's connection limit, checked against 20 for the duration of the dual run, when
+  two bots share the cluster (§9.3).
+- **TLS is terminated by the nginx already running on this host**, which listens on 80 and
+  443 for `dex-alert-bot.duckdns.org` (DuckDNS) with a Let's Encrypt certificate renewed
+  there by certbot, valid to 2026-11-27. The bot never handles a certificate, never binds
+  443 and has no HTTPS code path. It serves plain HTTP on `WEBHOOK_PORT` and binds
+  `WEBHOOK_HOST`. `WEBHOOK_URL` is only the public https address given to Telegram, and
+  §2.1 rejects a non-https value at startup. Neither the domain nor the certificate changes,
+  now or at cutover.
+- **One new nginx location, and the addresses that follow from it.** nginx already proxies
+  `https://dex-alert-bot.duckdns.org/webhook` to `http://127.0.0.1:3000/webhook`, the legacy
+  bot. The Python bot gets a second location, `/webhook-v2` → `http://127.0.0.1:3001`,
+  checked into `deploy/` next to the systemd unit. So:
+  `WEBHOOK_HOST=127.0.0.1` — nothing but nginx may reach the process — `WEBHOOK_PORT=3001`,
+  the legacy bot holds 3000, `WEBHOOK_PATH=/webhook-v2`, read from the environment and never
+  hardcoded, and `WEBHOOK_URL=https://dex-alert-bot.duckdns.org/webhook-v2`. These are the
+  defaults in `.env.example`, so a missing `EnvironmentFile` entry cannot make the new bot
+  collide with the legacy port.
 
 ### 9.2 The `users` schema change, read-compatible
 
@@ -367,9 +377,10 @@ user's next message restores `deliverable`.
 Telegram delivers a token's updates to exactly one webhook registration, so the two bots
 cannot share one. The human creates a second BotFather token for the Python bot.
 
-- The Python bot runs on the new host with token #2, its own `WEBHOOK_URL` on the public
-  https address the open decision in §9.1 supplies, and a **cloned** database — cloned as
-  described below, once per comparison window. Production is untouched throughout.
+- The Python bot runs as its own unit on the shared host with token #2, the `/webhook-v2`
+  address of §9.1, and a **cloned** database — cloned as described below, once per
+  comparison window. Production is untouched throughout: the legacy unit keeps token #1,
+  port 3000 and the production database, and nothing in nginx moves.
 - **Sends are real and they arrive.** There is no dry-run mode and no `DRY_RUN` flag: a
   switch that silently disables all sending is a dangerous thing to carry in a bot whose
   only job is to send. The operator presses **Start** on bot #2 before the window opens, so
@@ -446,7 +457,7 @@ Three consequences, none of them optional:
 
 1. Drop the previous clone database, if one is left over. Only the clone name is ever dropped.
 2. `mongodump` production and `mongorestore` under the clone name, as above.
-3. On the new host's `EnvironmentFile`: token #2 in `TELEGRAM_TOKEN`, the clone name in
+3. In the new unit's `EnvironmentFile`: token #2 in `TELEGRAM_TOKEN`, the clone name in
    `MONGO_DB_NAME`. `MONGO_URI` is otherwise production's.
 4. Start the unit. Check that bot #2 answers `/help`, and that the operator has pressed Start
    on it so no send can 403.
@@ -465,19 +476,24 @@ both loops would write `condition.baselinePrice` on the same alerts.
 2. Record `getWebhookInfo` on the production token: `pending_update_count` and
    `last_error_message`. This is where the token error is visible, and the count says how
    large a backlog step 4 is about to discard.
-3. Stop and disable the old unit on the old host. Its price loop ends here. Leave the host
-   and its configuration intact for the rollback.
+3. Stop and disable the old unit. Its price loop ends here. Leave its unit file, its
+   `EnvironmentFile` and its `/webhook` nginx location intact for the rollback; port 3000
+   simply falls idle.
 4. Put the production `TELEGRAM_TOKEN`, the production `MONGO_URI` and the real
-   `ADMIN_CHAT_IDS` into the new host's `EnvironmentFile`, then start the unit. Startup calls
-   `setWebhook` with the new URL, the secret token, `allowed_updates=["message"]` and
-   `drop_pending_updates=true` — which redirects the production token to the new host and
-   discards the backlog Telegram accumulated while every delivery was being rejected.
-   There is no data step: §9.2 changed nothing in the database.
+   `ADMIN_CHAT_IDS` into the new unit's `EnvironmentFile`, then start it. Startup calls
+   `setWebhook` with the secret token, `allowed_updates=["message"]` and
+   `drop_pending_updates=true` — which redirects the production token to `/webhook-v2` and
+   discards the backlog Telegram accumulated while every delivery was being rejected. The
+   URL is the one the dual run already used, so there is no nginx edit, no certificate step
+   and no DNS change at cutover. There is no data step either: §9.2 changed nothing in the
+   database.
 5. Watch the first cycles: alert volume against the dual-run figures, resident set against
    `MemoryMax`, Atlas connection count, and whether commands now answer.
 6. **Rollback:** start the old unit again. It calls `setWebhook` with its own `WEBHOOK_URL`
    at startup and re-claims the token, so rollback is one `systemctl start` plus stopping the
-   new unit. Nothing has to be restored, because no document was ever bulk-rewritten: the
+   new unit — its `/webhook` location was never removed from nginx, so the address it
+   registers still resolves to it. Nothing has to be restored, because no document was ever
+   bulk-rewritten: the
    old bot ignores the `deliverable` field it does not know about, and a user the new bot
    marked undeliverable is simply retried until its own 403 sets `status: "blocked"`, which
    is what it does today.
