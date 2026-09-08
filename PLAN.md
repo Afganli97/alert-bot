@@ -317,14 +317,17 @@ Deliberate extension points, each already a module or a registry rather than a T
   resident set measured during the dual run rather than guessed now; `Restart=on-failure`.
   Long-running processes are started by systemd, never by hand.
 - **Liveness is a systemd watchdog, not an HTTP endpoint.** The unit is `Type=notify` with
-  `WatchdogSec=` at a small multiple of `DEX_CYCLE_INTERVAL_MS` — 60 s against the 20 s cycle
-  — and `monitor/scheduler.py` sends `WATCHDOG=1` to `$NOTIFY_SOCKET` after each completed
+  `WatchdogSec=90` — roughly four `DEX_CYCLE_INTERVAL_MS` intervals against the 20 s cycle, so
+  ordinary slowness under swap pressure never restarts a bot that is merely slow. The value
+  lives in the unit in `deploy/`, with a comment naming that ratio so the two are changed
+  together. `monitor/scheduler.py` sends `WATCHDOG=1` to `$NOTIFY_SOCKET` after each completed
   cycle. That is a datagram on a unix socket written with the stdlib `socket` module: no
-  dependency, nothing added to §2. `READY=1` is sent once, after the webhook is registered and
-  the first cycle has completed. A price loop that stalls without the process dying is
-  therefore restarted — the failure `Restart=on-failure` cannot catch on its own. Nothing is
-  exposed on the network, there is no `/health` route, and when `NOTIFY_SOCKET` is unset — a
-  local run, a test — the notifier is a no-op.
+  dependency, nothing added to §2. `READY=1` is sent once on startup, after the webhook is
+  registered and the first cycle has completed. A price loop that stalls without the process
+  dying is therefore restarted — the failure `Restart=on-failure` cannot catch on its own.
+  Nothing is exposed on the network, there is no `/health` route and no `web/health.py` in the
+  §3 layout, and when `NOTIFY_SOCKET` is unset — a local run, a test — the notifier is a
+  no-op, never a crash.
 - **MongoDB Atlas.** The driver handles TLS to the cluster. One operational precondition is
   already satisfied — the egress address is on the Atlas IP allowlist, because it is the
   legacy bot's — and one remains: `MONGO_MAX_POOL_SIZE` (10, the legacy value) must fit the
