@@ -256,15 +256,17 @@ def load_settings(env: Env | None = None) -> Settings:
             "MONGO_URI must start with " + " or ".join(MONGO_URI_SCHEMES)
         )
 
-    webhook_path = _str_env(env, "WEBHOOK_PATH", "/webhook")
+    webhook_path = _str_env(env, "WEBHOOK_PATH", "/webhook-v2")
     if not webhook_path.startswith("/"):
         webhook_path = "/" + webhook_path
 
     webhook = WebhookSettings(
         mode=mode,
         url=_str_env(env, "WEBHOOK_URL"),
-        host=_str_env(env, "WEBHOOK_HOST", "0.0.0.0"),
-        port=_int_env(env, "WEBHOOK_PORT", 3000, 1),
+        # Defaults are the deployment values of PLAN.md §9.1: nginx on the same host
+        # terminates TLS, and the legacy bot holds 3000.
+        host=_str_env(env, "WEBHOOK_HOST", "127.0.0.1"),
+        port=_int_env(env, "WEBHOOK_PORT", 3001, 1),
         path=webhook_path,
         secret=_str_env(env, "WEBHOOK_SECRET"),
     )

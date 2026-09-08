@@ -1,0 +1,6 @@
+# Development dependencies. Not installed on the server.
+#   .venv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
+#
+# pytest only: async tests drive coroutines with asyncio.run() in ordinary test
+# functions, so pytest-asyncio is not needed. See PLAN.md §2 on keeping the list short.
+pytest==9.1.1

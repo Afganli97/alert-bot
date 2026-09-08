@@ -24,6 +24,13 @@ stating its future responsibility.
 4. **This project outlives the original.** Extension points (new alert conditions, new
    price sources, new chains, callback-query UI, localisation) are structural from day
    one even where the first implementation only fills in one case.
+5. **One user today, many tomorrow.** The community is private and the legacy bot has
+   exactly one user, the operator. This is **temporary**: the community will be opened
+   once the bots are ready. It is a licence to simplify one-off migration and dual-run
+   tooling — §9.2 and §9.3 — and nothing else. The send queue, the rate limits, the 429
+   handling, the undeliverable-user cache, the subscription limits, the indexes and the
+   broadcast batching are sized for the reopened community and are not to be downscaled on
+   the grounds of today's headcount.
 
 ---
 
@@ -61,8 +68,8 @@ rejected again. The `web/` package stays, and so does step 7 of §8.
   queueing update types the bot does not handle.
 - Startup fails loudly, before the listener binds, when `WEBHOOK_URL` is unset or does not
   start with `https://`, and when `WEBHOOK_SECRET` is unset. The message names the variable.
-- **TLS is terminated outside this process.** Existing infrastructure terminates it and
-  forwards to `WEBHOOK_HOST:WEBHOOK_PORT` over plain HTTP. The bot never reads a
+- **TLS is terminated outside this process.** nginx terminates it (§9.1) and forwards to
+  `WEBHOOK_HOST:WEBHOOK_PORT` over plain HTTP. The bot never reads a
   certificate, never binds 443 and has no HTTPS code path. `WEBHOOK_URL` is only the public
   https address handed to Telegram. See §9.1.
 - There is no `BOT_MODE` variable: there is one transport.
@@ -115,10 +122,8 @@ alert_bot/
 
   web/
     server.py            aiohttp app hosting the aiogram webhook
-    health.py            GET /health for the supervisor
 
 tests/                   pytest, mirrors the package layout
-scripts/                 one-shot operational scripts (the users migration, §9.2)
 deploy/                  systemd unit, no secrets in it (§9.1)
 ```
 
@@ -214,14 +219,14 @@ answered · **answered** = a question, not a defect. Nothing is left deferred.
 | §6.4 Price cache keyed on lowercased address, looked up with the raw stored address | fix now | A lookup that can never match is a defect, not a behaviour. Fixed by `chain.normalize_address` on both sides — lowercase for EVM, unchanged for Solana. **Visible consequence: Solana and checksummed-EVM alerts start firing** (see §7). |
 | §6.5 `addAlert` raises `Error('DUPLICATE_ALERT')`, caller tests `e.code === 11000` | fix now | Dead error branch; a typed `DuplicateAlertError` restores the "уже отслеживается" message the code always intended to send. |
 | §6.6 `alerts.status` written but never changed; `repeat:'always'` never read | port as-is | Both fields are written with the same values, so the documents stay identical for dual-run comparison. Whether a pause feature was planned is a §7 roadmap question, not a fix. |
-| §6.7 `users.status:'blocked'` conflates admin ban and user-blocked-the-bot; never cleared | fix now (decided) | The two meanings are split. **`status`** is the admin ban and nothing else, set and cleared only by `/admin block_user` and `/admin unblock_user`. **`deliverable`** is a boolean, set `false` on a Telegram 403 and back to `true` when the user sends any message. The price loop skips a user who is banned **or** undeliverable, so the exclusion set stays what it is today. Migration and its one awkward consequence: §9.2. |
+| §6.7 `users.status:'blocked'` conflates admin ban and user-blocked-the-bot; never cleared | fix now (decided) | The two meanings are split. **`status`** is the admin ban and nothing else, set and cleared only by `/admin block_user` and `/admin unblock_user`. **`deliverable`** is a boolean, set `false` on a Telegram 403 and back to `true` when the user sends any message. The price loop skips a user who is banned **or** undeliverable, so the exclusion set stays what it is today. No migration: legacy documents are handled on read, §9.2. |
 | §6.8 Baseline written after the send, per alert (crash re-fires; failed send still advances) | port as-is | Making it atomic changes which alerts fire around a restart, which is exactly what dual-run comparison measures. Listed for review; the atomic variant is in §7. |
-| §6.9a Broadcast aborts above 1000 active users instead of batching | fix now (decided) | The refusal is removed. The broadcast goes through the existing send queue in batches, so the 429 handling and the `TG_QUEUE_DELAY_MS` pacing already guard against a rate-limit storm. The admin gets a progress line every 100 recipients and a final total, and is asked to confirm before the first send when the audience exceeds 500. `BROADCAST_MAX_USERS` is replaced by `BROADCAST_CONFIRM_THRESHOLD` (500) and `BROADCAST_PROGRESS_EVERY` (100). |
+| §6.9a Broadcast aborts above 1000 active users instead of batching | fix now (decided) | The refusal is removed. Written now, exercised later: today's audience is one person, but the community reopens (§1.5) and this is the code that has to survive it. The broadcast goes through the existing send queue in batches, so the 429 handling and the `TG_QUEUE_DELAY_MS` pacing already guard against a rate-limit storm. The admin gets a progress line every 100 recipients and a final total, and is asked to confirm before the first send when the audience exceeds 500. `BROADCAST_MAX_USERS` is replaced by `BROADCAST_CONFIRM_THRESHOLD` (500) and `BROADCAST_PROGRESS_EVERY` (100). |
 | §6.9b Broadcast text is HTML-escaped, so admins cannot use formatting | port as-is | Escaping also prevents a malformed tag from failing every send in the batch. Enabling admin HTML is an admin-facing decision to make explicitly, not a silent change. |
 | §6.10a Downward moves render as `🔻 SYM 5.00%`, no minus sign | port as-is | The arrow already carries the direction and users read this message hundreds of times a day; changing it breaks both expectations and output comparison. |
 | §6.10b `formatPrice` has no guard for `price <= 0` | port as-is | Same formatting for the same input, including JS exponent spelling (`1.000e-5`, not Python's `1.000e-05`) — a parity requirement covered by tests. |
 | §6.11 Only `update.message` with non-empty text is handled | port as-is | The legacy bot sends no keyboards, so nothing in production can depend on callback queries; `allowed_updates=["message"]` keeps the surface identical. Buttons are §7. |
-| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | A separate Oracle Always Free instance (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by existing infrastructure in front of the process. Written up in §9.1. |
+| §6.12 Deployment facts absent from the repo (Node version, supervisor, `.env` path, Mongo location, TLS) | answered | The legacy bot's own host (Ubuntu 24.04, 1 GB RAM), MongoDB Atlas, a systemd unit with `MemoryMax=` and `EnvironmentFile=` for secrets, and TLS terminated by the nginx already on that host, which gains one `/webhook-v2` location. Written up in §9.1. |
 | §4 `TG_QUEUE_DELAY_MS` parsed into config but never read (35 ms hardcoded) | fix now | The variable is a no-op today, so nobody can depend on it; the queue reads it, with 35 ms as the default, preserving current timing. |
 | §4 `BLOCKED_USERS_CACHE_TTL_MS` used but missing from `.env.template` | fix now | Documentation-only; the variable is in `.env.example` with its default. |
 | §4 `TELEGRAM_TOKEN` re-read and `ADMIN_CHAT_IDS` re-parsed on every call | fix now | `process.env` does not change after `dotenv` loads it, so re-parsing is pure waste with no observable effect. Read once in `config.py`. |
@@ -256,11 +261,9 @@ proxy injecting the header and no out-of-band registration.
   commands users sent days ago and have forgotten.
 - **§6.4** — alerts on Solana tokens, and on EVM addresses stored in checksummed form,
   currently never fire. After the fix they fire. Affected users start receiving
-  notifications they have never received, with a first-cycle baseline. Step 2 of §8 counts
-  those alerts first, so the traffic change is known before cutover rather than after.
-- **Admin-visible, §9.2:** the `users` migration lifts any ban an admin set by hand, because
-  the legacy field cannot say which `blocked` is which. The script lists the ids it touched
-  so those bans can be re-applied.
+  notifications they have never received, with a first-cycle baseline. §9.6 counts those
+  alerts off Atlas before cutover, so the traffic change is known in advance rather than
+  after.
 
 One inference, flagged as an inference rather than a measurement: with `/add` unreachable,
 no alert can have been created since the webhook broke, so the production alert corpus is
@@ -288,11 +291,12 @@ Deliberate extension points, each already a module or a registry rather than a T
 ## 8. Delivery order
 
 1. **This commit** — skeleton: layout, `config.py`, `.env.example`, `requirements.txt`.
-2. Storage layer against the existing schema, plus a read-only smoke test on a copy. Also
-   the `users` migration script (§9.2) and the counting queries of §9.6.
+2. Storage layer against the existing schema, including the backward-compatible read of
+   §9.2, plus a read-only smoke test on a copy.
 3. `chains/` with its validation/normalisation tests (the §6.4 fix lands here).
 4. `services/` — DexScreener and the send queue, tested against recorded responses.
-5. `monitor/` — the cycle and conditions, byte-compared against legacy message output.
+5. `monitor/` — the cycle and conditions, byte-compared against legacy message output,
+   including the watchdog notifier of §9.1.
 6. `bot/` — routers and FSM, replacing the sessions Map.
 7. `web/` — webhook with a real `secret_token` (§6.1, §2.1).
 8. Dual run on the second bot token against a cloned database, output diffed, then the
@@ -302,58 +306,168 @@ Deliberate extension points, each already a module or a registry rather than a T
 
 ### 9.1 Host and process
 
-- A **separate Oracle Always Free instance**, Ubuntu 24.04, 1 GB RAM shared with other
-  processes. The legacy bot keeps its own host until the cutover is judged final.
+- **The same host as the legacy bot** (`dexscreener-bot-v3`), Ubuntu 24.04, 1 GB RAM, now
+  shared with the legacy process as well as everything else on it. With one user, a second
+  instance would buy an independence we do not need yet, and retiring the legacy host is a
+  separate task for after the cutover. Both bots share the 1 GB, which is what `MemoryMax=`
+  is sized against once the dual run has measured the resident set.
 - Python 3.12, one virtualenv, `pip install --no-cache-dir`.
 - **systemd**, unit checked into `deploy/` with no secrets in it: `EnvironmentFile=` supplies
   `TELEGRAM_TOKEN`, `MONGO_URI` and `WEBHOOK_SECRET`; `MemoryMax=` is set, sized from the
   resident set measured during the dual run rather than guessed now; `Restart=on-failure`.
   Long-running processes are started by systemd, never by hand.
-- **MongoDB Atlas.** The driver handles TLS to the cluster. Two operational preconditions:
-  the instance's egress address is on the Atlas IP allowlist, and `MONGO_MAX_POOL_SIZE` (10,
-  the legacy value) fits the cluster tier's connection limit.
-- **TLS is terminated in front of the bot** by existing infrastructure. The process serves
-  plain HTTP on `WEBHOOK_PORT` and binds `WEBHOOK_HOST` — `127.0.0.1` when the terminator
-  runs on the same host. It never handles a certificate. `WEBHOOK_URL` is only the public
-  https address given to Telegram, and §2.1 rejects a non-https value at startup.
+- **Liveness is a systemd watchdog, not an HTTP endpoint.** The unit is `Type=notify` with
+  `WatchdogSec=90` — roughly four `DEX_CYCLE_INTERVAL_MS` intervals against the 20 s cycle, so
+  ordinary slowness under swap pressure never restarts a bot that is merely slow. The value
+  lives in the unit in `deploy/`, with a comment naming that ratio so the two are changed
+  together. `monitor/scheduler.py` sends `WATCHDOG=1` to `$NOTIFY_SOCKET` after each completed
+  cycle. That is a datagram on a unix socket written with the stdlib `socket` module: no
+  dependency, nothing added to §2. `READY=1` is sent once on startup, after the webhook is
+  registered and the first cycle has completed. A price loop that stalls without the process
+  dying is therefore restarted — the failure `Restart=on-failure` cannot catch on its own.
+  Nothing is exposed on the network, there is no `/health` route and no `web/health.py` in the
+  §3 layout, and when `NOTIFY_SOCKET` is unset — a local run, a test — the notifier is a
+  no-op, never a crash.
+- **MongoDB Atlas.** The driver handles TLS to the cluster. One operational precondition is
+  already satisfied — the egress address is on the Atlas IP allowlist, because it is the
+  legacy bot's — and one remains: `MONGO_MAX_POOL_SIZE` (10, the legacy value) must fit the
+  cluster tier's connection limit, checked against 20 for the duration of the dual run, when
+  two bots share the cluster (§9.3).
+- **TLS is terminated by the nginx already running on this host**, which listens on 80 and
+  443 for `dex-alert-bot.duckdns.org` (DuckDNS) with a Let's Encrypt certificate renewed
+  there by certbot, valid to 2026-11-27. The bot never handles a certificate, never binds
+  443 and has no HTTPS code path. It serves plain HTTP on `WEBHOOK_PORT` and binds
+  `WEBHOOK_HOST`. `WEBHOOK_URL` is only the public https address given to Telegram, and
+  §2.1 rejects a non-https value at startup. Neither the domain nor the certificate changes,
+  now or at cutover.
+- **One new nginx location, and the addresses that follow from it.** nginx already proxies
+  `https://dex-alert-bot.duckdns.org/webhook` to `http://127.0.0.1:3000/webhook`, the legacy
+  bot. The Python bot gets a second location, `/webhook-v2` → `http://127.0.0.1:3001`,
+  checked into `deploy/` next to the systemd unit. So:
+  `WEBHOOK_HOST=127.0.0.1` — nothing but nginx may reach the process — `WEBHOOK_PORT=3001`,
+  the legacy bot holds 3000, `WEBHOOK_PATH=/webhook-v2`, read from the environment and never
+  hardcoded, and `WEBHOOK_URL=https://dex-alert-bot.duckdns.org/webhook-v2`. These are the
+  defaults in `.env.example`, so a missing `EnvironmentFile` entry cannot make the new bot
+  collide with the legacy port.
 
-### 9.2 The `users` migration
+### 9.2 The `users` schema change, read-compatible
 
-`deliverable: bool` is added, defaulting to `true`; `status` keeps its values but now means
-the admin ban only. One idempotent script in `scripts/`, run against the clone first:
+`deliverable: bool` is added and `status` now means the admin ban only (§6.7). **There is no
+migration script.** With one user (§1.5) there is nothing to migrate, so the split lands as
+mapping rules in `storage/models.py` and query shape in `storage/users.py` instead — which
+removes a script, a rollback hazard and the admin-ban question at once.
 
-- `status: "blocked"` → `deliverable: false, status: "active"`; every other document →
-  `deliverable: true`.
-- The index `{status: 1, deliverable: 1}` replaces the `{status: 1}` index planned for the
-  loop's exclusion query.
-- The field is additive and the legacy bot ignores unknown fields, so a clone can be
-  migrated while production keeps running on the same schema.
+- **On read:** a missing `deliverable` reads as `true`; a legacy `status: "blocked"`
+  document reads as `deliverable: false`.
+- **On write:** new writes always use the split fields. No document is ever rewritten in
+  bulk, in any collection, by either bot.
+- **The loop's exclusion query** covers both shapes at once:
+  `{"status": {"$ne": "blocked"}, "deliverable": {"$ne": false}}` — banned or undeliverable
+  is skipped, and a legacy document is excluded exactly as it is today.
+- The index becomes `{status: 1, deliverable: 1}` instead of the `{status: 1}` planned for
+  that query. This is startup schema setup, not migration tooling, so it stays.
+- The field is additive and the legacy bot ignores unknown fields, so both bots can run
+  against the same schema throughout.
 
-**The consequence worth stating plainly:** a legacy `blocked` document cannot say whether an
-admin banned the user or the user blocked the bot, and the decision is to read every one of
-them as `deliverable: false`. So a genuine admin ban is lifted by the migration, and that
-user is restored to `deliverable` on their next message. The script writes the ids it
-touched to a file before updating them, so the admin can review that list and re-issue
-`/admin block_user` for the few that were real bans. §9.6 counts them in advance.
+A legacy `blocked` document still cannot say whether an admin banned the user or the user
+blocked the bot, so it is read as both and stays excluded either way. Reading it costs
+nothing because no such document exists today — one user, not blocked, a number §9.6
+confirms off Atlas. Should one ever appear, `/admin unblock_user` clears the ban and the
+user's next message restores `deliverable`.
 
 ### 9.3 Dual run on a second token
 
 Telegram delivers a token's updates to exactly one webhook registration, so the two bots
 cannot share one. The human creates a second BotFather token for the Python bot.
 
-- The Python bot runs on the new host with token #2, its own `WEBHOOK_URL` behind the same
-  TLS front, and a **cloned** database. Production is untouched throughout.
-- **Sends are real** — no dry-run mode. Bot #2 cannot open a conversation with a user who
-  never started it, so those sends come back 403, exactly like a user who blocked the bot.
-- That interacts with §6.7: each 403 sets `deliverable: false` on the clone, and an
-  undeliverable user is skipped from the next cycle on. Each user therefore contributes one
-  comparable cycle per reset. The migration script carries a
-  `users.update_many({}, {"$set": {"deliverable": True}})` reset to run on the clone before
-  each comparison window. Never against production.
-- The comparison uses the queue's INFO send log (§5), which records the intended chat id and
-  message text whether or not delivery succeeded, diffed against the legacy bot's output for
-  the same cycle window. The §6.4 alerts that only the new bot fires are expected extras and
-  are listed separately rather than counted as differences.
+- The Python bot runs as its own unit on the shared host with token #2, the `/webhook-v2`
+  address of §9.1, and a **cloned** database — cloned as described below, once per
+  comparison window. Production is untouched throughout: the legacy unit keeps token #1,
+  port 3000 and the production database, and nothing in nginx moves.
+- **Sends are real and they arrive.** There is no dry-run mode and no `DRY_RUN` flag: a
+  switch that silently disables all sending is a dangerous thing to carry in a bot whose
+  only job is to send. The operator presses **Start** on bot #2 before the window opens, so
+  bot #2 is allowed to message them and every send succeeds.
+- Consequently **no 403s, `deliverable` stays `true` on the clone, and nothing has to be
+  reset between comparison windows** — every cycle in the window is comparable, not just the
+  first. This rests on the temporary single-user situation of §1.5: with a real audience,
+  the members who never started bot #2 would answer 403, each one would go undeliverable
+  after its first cycle, and the dual run would need a different design.
+- The comparison uses two artefacts: the queue's INFO send log (§5), which records the
+  intended chat id and message text for every attempt, and **the two message streams the
+  operator receives** — one per bot, read side by side — for the same cycle window. The
+  §6.4 alerts that only the new bot fires are expected extras and are listed separately
+  rather than counted as differences.
+
+**How the clone is made.** The Atlas free tier has no snapshot restore, so the clone is a
+`mongodump`/`mongorestore` pair into a **second database inside the same cluster**, under a
+different name:
+
+```
+mongodump    --uri="$MONGO_URI" --out "$TMP/dump"
+mongorestore --uri="$MONGO_URI" --drop \
+             --nsFrom 'dexalerts.*' --nsTo 'dexalerts_clone.*' "$TMP/dump"
+```
+
+- The tools are `mongodb-database-tools`, run by the operator. They are not a project
+  dependency and no code in this repository clones anything.
+- The Python bot is pointed at the clone with `MONGO_DB_NAME=dexalerts_clone`, which already
+  exists in `.env.example` and overrides the database name embedded in the URI; the connection
+  string itself is unchanged. The legacy bot cannot be misdirected the same way — it calls
+  `client.db()` with no argument (`lib/db.js:25`) and always uses the name in its own URI.
+- `--drop` acts only on the namespaces being restored, and both names are visible in the one
+  command, so it is checked before it is run. Production is never a restore target.
+- Both bots then talk to **one cluster and share its connection budget**: two processes at
+  `maxPoolSize` 10 is up to 20 connections, before anything the operator's own tools hold.
+  The Atlas precondition in §9.1 is therefore checked against 20 for the duration of the dual
+  run, not 10. The clone also doubles the stored data against the tier's storage quota;
+  today's corpus is small enough that this is a note rather than a constraint.
+- The dump is not a point-in-time snapshot, and it does not need to be: `/add` is unreachable
+  in production (§6), so the alert corpus is frozen and `condition.baselinePrice` is the only
+  field a concurrent production cycle can move.
+
+**Comparison drift is structural, and it caps the window length.**
+
+Both databases start identical, so the first cycles are directly comparable. They stop being
+comparable the moment the two bots write different baselines for the same alert, and that is
+guaranteed to happen:
+
+- A §6.4 alert — Solana, or a checksummed EVM address — fires only on the new bot.
+  `updateAlertBaseline` (`checkers/dexPriceChecker.js:120`) rewrites `condition.baselinePrice`
+  on the clone; production keeps what it holds, which for these alerts is a value written
+  before the address stopped matching, or `null`. From that moment the two documents for that
+  alert differ permanently.
+- Because the baseline is the anchor for the *next* comparison and is reset to the current
+  price at every firing (§5, `conditionEvaluator.js:25-40`), the divergence compounds: each
+  later firing is measured from a different anchor on each side, so the firings drift further
+  apart with every one of them.
+- The same happens, more slowly, to alerts both bots fire: two independent 20 s loops sample
+  at different instants, each side anchors at a slightly different price, and those
+  differences accumulate too.
+
+Three consequences, none of them optional:
+
+- **Windows are short** — hours, not days.
+- **Every window starts from a fresh clone.** Re-cloning is the only thing that
+  re-synchronises the baselines. `/reset_anchors` is not a substitute: it nulls the baselines
+  on one database, so it creates a difference instead of removing one, and it is never run
+  against production.
+- **Differences observed late in a long window are not evidence of a new defect.** Divergence
+  is the expected end state of a long run. Only a difference seen in a window that started
+  from a fresh clone counts as a finding.
+
+**The dual-run procedure**, once per window:
+
+1. Drop the previous clone database, if one is left over. Only the clone name is ever dropped.
+2. `mongodump` production and `mongorestore` under the clone name, as above.
+3. In the new unit's `EnvironmentFile`: token #2 in `TELEGRAM_TOKEN`, the clone name in
+   `MONGO_DB_NAME`. `MONGO_URI` is otherwise production's.
+4. Start the unit. Check that bot #2 answers `/help`, and that the operator has pressed Start
+   on it so no send can 403.
+5. Run the window. Read the two message streams side by side against the queue's INFO send
+   log (§5).
+6. Stop the unit. Write down the differences; list the §6.4 extras separately.
+7. For the next window, return to step 1. A clone is never reused across windows.
 
 ### 9.4 Cutover
 
@@ -364,21 +478,28 @@ both loops would write `condition.baselinePrice` on the same alerts.
 1. The dual-run diff is clean apart from the expected §6.4 extras.
 2. Record `getWebhookInfo` on the production token: `pending_update_count` and
    `last_error_message`. This is where the token error is visible, and the count says how
-   large a backlog step 5 is about to discard.
-3. Stop and disable the old unit on the old host. Its price loop ends here. Leave the host
-   and its configuration intact for the rollback.
-4. Run the §9.2 migration against the production `users` collection, keeping the list of
-   previously blocked ids.
-5. Put the production `TELEGRAM_TOKEN`, the production `MONGO_URI` and the real
-   `ADMIN_CHAT_IDS` into the new host's `EnvironmentFile`, then start the unit. Startup calls
-   `setWebhook` with the new URL, the secret token, `allowed_updates=["message"]` and
-   `drop_pending_updates=true` — which redirects the production token to the new host and
-   discards the backlog Telegram accumulated while every delivery was being rejected.
-6. Watch the first cycles: alert volume against the dual-run figures, resident set against
+   large a backlog step 4 is about to discard.
+3. Stop and disable the old unit. Its price loop ends here. Leave its unit file, its
+   `EnvironmentFile` and its `/webhook` nginx location intact for the rollback; port 3000
+   simply falls idle.
+4. Put the production `TELEGRAM_TOKEN`, the production `MONGO_URI` and the real
+   `ADMIN_CHAT_IDS` into the new unit's `EnvironmentFile`, then start it. Startup calls
+   `setWebhook` with the secret token, `allowed_updates=["message"]` and
+   `drop_pending_updates=true` — which redirects the production token to `/webhook-v2` and
+   discards the backlog Telegram accumulated while every delivery was being rejected. The
+   URL is the one the dual run already used, so there is no nginx edit, no certificate step
+   and no DNS change at cutover. There is no data step either: §9.2 changed nothing in the
+   database.
+5. Watch the first cycles: alert volume against the dual-run figures, resident set against
    `MemoryMax`, Atlas connection count, and whether commands now answer.
-7. **Rollback:** start the old unit again. It calls `setWebhook` with its own `WEBHOOK_URL`
+6. **Rollback:** start the old unit again. It calls `setWebhook` with its own `WEBHOOK_URL`
    at startup and re-claims the token, so rollback is one `systemctl start` plus stopping the
-   new unit. The `deliverable` field it does not know about is simply ignored.
+   new unit — its `/webhook` location was never removed from nginx, so the address it
+   registers still resolves to it. Nothing has to be restored, because no document was ever
+   bulk-rewritten: the
+   old bot ignores the `deliverable` field it does not know about, and a user the new bot
+   marked undeliverable is simply retried until its own 403 sets `status: "blocked"`, which
+   is what it does today.
 
 ### 9.5 `.env.example` changes
 
@@ -394,10 +515,11 @@ These land with the implementation, not with this document:
 ### 9.6 To measure, not to decide
 
 Three numbers to read off the database before the cutover, none of them a question for
-anyone:
+anyone. **Manual checks, not code:** the operator reads the first two in Atlas and the third
+from `getWebhookInfo`. No script, no counting queries in the delivery order.
 
 1. Alerts whose stored address differs from its normalised form — the size of the §6.4
    traffic change.
-2. The count and the id list of `status: "blocked"` users, before the §9.2 migration touches
-   them.
+2. The count of `status: "blocked"` users, expected to be zero — this confirms that the
+   legacy-document read path of §9.2 is empty in practice today.
 3. `pending_update_count` on the production token (§9.4 step 2).
