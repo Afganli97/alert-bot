@@ -34,6 +34,9 @@ __all__ = [
     "RuntimeSettings",
     "get_settings",
     "load_settings",
+    "load_mongo_settings",
+    "load_limit_settings",
+    "load_admin_chat_ids",
 ]
 
 logger = logging.getLogger(__name__)
@@ -238,6 +241,53 @@ class Settings:
 # ---------------------------------------------------------------------------
 
 
+def load_mongo_settings(env: Env | None = None) -> MongoSettings:
+    """Parse the database section alone, without requiring a bot token.
+
+    Split out of :func:`load_settings` for the maintenance scripts in ``scripts/``, which
+    talk to MongoDB and to nothing else; they must not have to invent a ``TELEGRAM_TOKEN``
+    to run. The variables and their validation stay declared here, as the module contract
+    requires.
+    """
+    env = os.environ if env is None else env
+    uri = _required_env(env, "MONGO_URI")
+    if not uri.startswith(MONGO_URI_SCHEMES):
+        raise ConfigError("MONGO_URI must start with " + " or ".join(MONGO_URI_SCHEMES))
+    return MongoSettings(
+        uri=uri,
+        database=_str_env(env, "MONGO_DB_NAME"),
+        max_pool_size=_int_env(env, "MONGO_MAX_POOL_SIZE", 10, 1),
+        min_pool_size=_int_env(env, "MONGO_MIN_POOL_SIZE", 1, 0),
+        server_selection_timeout_ms=_int_env(env, "MONGO_SERVER_SELECTION_TIMEOUT_MS", 5000, 1),
+        socket_timeout_ms=_int_env(env, "MONGO_SOCKET_TIMEOUT_MS", 45000, 1),
+        connect_timeout_ms=_int_env(env, "MONGO_CONNECT_TIMEOUT_MS", 10000, 1),
+    )
+
+
+def load_limit_settings(env: Env | None = None) -> LimitSettings:
+    """Parse the ceilings section alone; same reason as :func:`load_mongo_settings`."""
+    env = os.environ if env is None else env
+    return LimitSettings(
+        subscription={
+            "basic": _int_env(env, "SUBSCRIPTION_LIMIT_BASIC", 5, 1),
+            "pro": _int_env(env, "SUBSCRIPTION_LIMIT_PRO", 15, 1),
+            "premium": _int_env(env, "SUBSCRIPTION_LIMIT_PREMIUM", 50, 1),
+        },
+        rate_limit_commands=_int_env(env, "RATE_LIMIT_COMMANDS", 10, 1),
+        rate_limit_window_ms=_int_env(env, "RATE_LIMIT_WINDOW_MS", 60000, 1),
+        session_ttl_ms=_int_env(env, "SESSION_TTL_MS", 1800000, 1),
+        session_cleanup_interval_ms=_int_env(env, "SESSION_CLEANUP_INTERVAL_MS", 300000, 1),
+        blocked_users_cache_ttl_ms=_int_env(env, "BLOCKED_USERS_CACHE_TTL_MS", 300000, 60000),
+        broadcast_max_users=_int_env(env, "BROADCAST_MAX_USERS", 1000, 1),
+    )
+
+
+def load_admin_chat_ids(env: Env | None = None) -> frozenset[str]:
+    """The ``ADMIN_CHAT_IDS`` allow-list, parsed once."""
+    env = os.environ if env is None else env
+    return frozenset(_csv_env(env, "ADMIN_CHAT_IDS"))
+
+
 def load_settings(env: Env | None = None) -> Settings:
     """Parse and validate the environment.
 
@@ -250,11 +300,7 @@ def load_settings(env: Env | None = None) -> Settings:
     if mode not in BOT_MODES:
         raise ConfigError(f"BOT_MODE must be one of {', '.join(BOT_MODES)}, got {mode!r}")
 
-    mongo_uri = _required_env(env, "MONGO_URI")
-    if not mongo_uri.startswith(MONGO_URI_SCHEMES):
-        raise ConfigError(
-            "MONGO_URI must start with " + " or ".join(MONGO_URI_SCHEMES)
-        )
+    mongo = load_mongo_settings(env)
 
     webhook_path = _str_env(env, "WEBHOOK_PATH", "/webhook-v2")
     if not webhook_path.startswith("/"):
@@ -279,18 +325,10 @@ def load_settings(env: Env | None = None) -> Settings:
         telegram=TelegramSettings(
             token=_required_env(env, "TELEGRAM_TOKEN"),
             api_base_url=_str_env(env, "TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
-            admin_chat_ids=frozenset(_csv_env(env, "ADMIN_CHAT_IDS")),
+            admin_chat_ids=load_admin_chat_ids(env),
             queue_delay_ms=_int_env(env, "TG_QUEUE_DELAY_MS", 35, 1),
         ),
-        mongo=MongoSettings(
-            uri=mongo_uri,
-            database=_str_env(env, "MONGO_DB_NAME"),
-            max_pool_size=_int_env(env, "MONGO_MAX_POOL_SIZE", 10, 1),
-            min_pool_size=_int_env(env, "MONGO_MIN_POOL_SIZE", 1, 0),
-            server_selection_timeout_ms=_int_env(env, "MONGO_SERVER_SELECTION_TIMEOUT_MS", 5000, 1),
-            socket_timeout_ms=_int_env(env, "MONGO_SOCKET_TIMEOUT_MS", 45000, 1),
-            connect_timeout_ms=_int_env(env, "MONGO_CONNECT_TIMEOUT_MS", 10000, 1),
-        ),
+        mongo=mongo,
         webhook=webhook,
         dex=DexSettings(
             base_url=_str_env(env, "DEXSCREENER_BASE_URL", "https://api.dexscreener.com"),
@@ -303,19 +341,7 @@ def load_settings(env: Env | None = None) -> Settings:
             retry_attempts=_int_env(env, "HTTP_RETRY_ATTEMPTS", 3, 1),
             retry_backoff_ms=_int_env(env, "HTTP_RETRY_BACKOFF_MS", 2000, 0),
         ),
-        limits=LimitSettings(
-            subscription={
-                "basic": _int_env(env, "SUBSCRIPTION_LIMIT_BASIC", 5, 1),
-                "pro": _int_env(env, "SUBSCRIPTION_LIMIT_PRO", 15, 1),
-                "premium": _int_env(env, "SUBSCRIPTION_LIMIT_PREMIUM", 50, 1),
-            },
-            rate_limit_commands=_int_env(env, "RATE_LIMIT_COMMANDS", 10, 1),
-            rate_limit_window_ms=_int_env(env, "RATE_LIMIT_WINDOW_MS", 60000, 1),
-            session_ttl_ms=_int_env(env, "SESSION_TTL_MS", 1800000, 1),
-            session_cleanup_interval_ms=_int_env(env, "SESSION_CLEANUP_INTERVAL_MS", 300000, 1),
-            blocked_users_cache_ttl_ms=_int_env(env, "BLOCKED_USERS_CACHE_TTL_MS", 300000, 60000),
-            broadcast_max_users=_int_env(env, "BROADCAST_MAX_USERS", 1000, 1),
-        ),
+        limits=load_limit_settings(env),
         runtime=RuntimeSettings(
             log_level=_str_env(env, "LOG_LEVEL", "INFO").upper(),
             shutdown_drain_timeout_ms=_int_env(env, "SHUTDOWN_DRAIN_TIMEOUT_MS", 5000, 0),
