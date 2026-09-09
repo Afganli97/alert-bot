@@ -349,6 +349,10 @@ Deliberate extension points, each already a module or a registry rather than a T
   hardcoded, and `WEBHOOK_URL=https://dex-alert-bot.duckdns.org/webhook-v2`. These are the
   defaults in `.env.example`, so a missing `EnvironmentFile` entry cannot make the new bot
   collide with the legacy port.
+- **The legacy bot is supervised by PM2** (God Daemon v7.0.1, process list under
+  `/home/ubuntu/.pm2`), not by systemd; only the new bot is a systemd unit. Removing PM2 and
+  Node.js from the host once the Python bot has proved stable is a separate later task, not
+  part of the cutover — §9.4 rollback needs both of them in place.
 
 ### 9.2 The `users` schema change, read-compatible
 
@@ -479,9 +483,24 @@ both loops would write `condition.baselinePrice` on the same alerts.
 2. Record `getWebhookInfo` on the production token: `pending_update_count` and
    `last_error_message`. This is where the token error is visible, and the count says how
    large a backlog step 4 is about to discard.
-3. Stop and disable the old unit. Its price loop ends here. Leave its unit file, its
-   `EnvironmentFile` and its `/webhook` nginx location intact for the rollback; port 3000
-   simply falls idle.
+3. Stop the old bot under PM2 — it is a PM2 process, not a systemd unit (§9.1). Take the
+   process name from `pm2 list`, then:
+
+   ```
+   pm2 stop <name>
+   pm2 delete <name>
+   pm2 save
+   ```
+
+   Save `pm2 describe <name>` — script path, cwd, interpreter, env — before the `delete`:
+   the repository has no `ecosystem.config.js`, so once the entry is gone from the process
+   list, step 6 needs those values to bring it back.
+
+   All three matter. Killing the process instead makes PM2 restart it immediately, which is
+   exactly the two-bots-on-one-token state this step exists to prevent, and without
+   `pm2 save` the saved process list survives and PM2 resurrects the bot on the next reboot.
+   Its price loop ends here. Leave its working directory, its environment file and its
+   `/webhook` nginx location intact for the rollback; port 3000 simply falls idle.
 4. Put the production `TELEGRAM_TOKEN`, the production `MONGO_URI` and the real
    `ADMIN_CHAT_IDS` into the new unit's `EnvironmentFile`, then start it. Startup calls
    `setWebhook` with the secret token, `allowed_updates=["message"]` and
@@ -492,10 +511,12 @@ both loops would write `condition.baselinePrice` on the same alerts.
    database.
 5. Watch the first cycles: alert volume against the dual-run figures, resident set against
    `MemoryMax`, Atlas connection count, and whether commands now answer.
-6. **Rollback:** start the old unit again. It calls `setWebhook` with its own `WEBHOOK_URL`
-   at startup and re-claims the token, so rollback is one `systemctl start` plus stopping the
-   new unit — its `/webhook` location was never removed from nginx, so the address it
-   registers still resolves to it. Nothing has to be restored, because no document was ever
+6. **Rollback:** start the old bot again with `pm2 start <name>`, not a `systemctl` call —
+   from the entry step 3 recorded, if PM2 no longer knows the name after the delete. It
+   calls `setWebhook` with its own `WEBHOOK_URL` at startup and re-claims the token — that
+   part is unchanged — so rollback is that one command plus stopping the new unit; its
+   `/webhook` location was never removed from nginx, so the address it registers still
+   resolves to it. Nothing has to be restored, because no document was ever
    bulk-rewritten: the
    old bot ignores the `deliverable` field it does not know about, and a user the new bot
    marked undeliverable is simply retried until its own 403 sets `status: "blocked"`, which
